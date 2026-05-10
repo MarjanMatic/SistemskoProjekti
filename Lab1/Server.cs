@@ -51,6 +51,7 @@ namespace Projekat1
         public void Stop()
         {
             listener.Stop();
+            Console.WriteLine("Stopping");
         }
     }
 }

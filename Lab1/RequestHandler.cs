@@ -18,6 +18,7 @@ namespace Projekat1
     {
         private static readonly HttpClient client = new HttpClient();
         private static string token;
+        private static string user;
 
         private static readonly Queue<HttpListenerContext> requestQueue = new Queue<HttpListenerContext>();
         private static readonly object lockQueue = new object();
@@ -30,10 +31,16 @@ namespace Projekat1
             IConfigurationRoot secrets = new ConfigurationBuilder()
                 .AddUserSecrets<Program>()
                 .Build();
+
+
             if (secrets["github_token"] == null)
                 throw new Exception("You need to set github token");
 
+            if (secrets["user-agent"] == null)
+                throw new Exception("You need to set user-agent");
+
             token = secrets["github_token"];
+            user = secrets["user-agent"];
         }
         public static void SetMaxConcurrentCount(int count)
         {
@@ -69,42 +76,60 @@ namespace Projekat1
             if (data != null)
             {
                 //Cache hit
-                Console.WriteLine("Cache Hit");
+                Console.WriteLine("Cache Hit on " + repo);
                 Respond(response, HttpStatusCode.OK, data.ToString());
                 return;
             }
 
             //Cache miss
-            lock(lockCache)
+            lock (lockCache)
             {
                 // Check again, maybe it was updated
                 data = cache.get(repo);
                 if (data != null)
                 {
-                    Console.WriteLine("Cache hit 2");
+                    Console.WriteLine("Cache hit on " + repo + " prevented stampede");
                     Respond(response, HttpStatusCode.OK, data.ToString());
                     return;
                 }
-                Console.WriteLine("Cache miss");
-                JArray gitResponse = GithubRequest(repo);
-                int totalCommits = 0;
-                data = new JObject();
-                foreach(var commiter in gitResponse)
+                Console.WriteLine("Cache miss on " + repo);
+                try
                 {
-                    var author = (string)commiter["author"]["login"];
-                    var commits = (int)commiter["total"];
-                    totalCommits += commits;
+                    JArray gitResponse = GithubRequest(repo);
+                    int totalCommits = 0;
+                    data = new JObject();
+                    foreach (var commiter in gitResponse)
+                    {
+                        var author = (string)commiter["author"]["login"];
+                        var commits = (int)commiter["total"];
+                        totalCommits += commits;
 
-                    data.Add(author, commits);
+                        data.Add(author, commits);
+                    }
+                    data.Add("total", totalCommits);
+
+                    cache.set(repo, data);
+                    Console.WriteLine("Updating cache " + repo);
                 }
-                data.Add("total", totalCommits);
+                catch (HttpRequestException e)
+                {
+                    if (e.StatusCode == HttpStatusCode.NotFound)
+                    {
+                        Respond(response, HttpStatusCode.NotFound, "Repo doesn't exist");
+                        return;
+                    }
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine(e.Message);
+                    Respond(response, HttpStatusCode.InternalServerError);
+                    return;
+                }
 
-                cache.set(repo, data);
             }
 
             Respond(response, HttpStatusCode.OK, data.ToString());
             return;
-
         }
 
         private static JArray GithubRequest(string repo)
@@ -113,13 +138,17 @@ namespace Projekat1
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-            request.Headers.Add("User-Agent", "MarjanMatic");
+            request.Headers.Add("User-Agent", user);
             request.Headers.Add("X-GitHub-Api-Version", "2026-03-10");
 
             using var response = client.SendAsync(request).Result;
             response.EnsureSuccessStatusCode();
 
             string content = response.Content.ReadAsStringAsync().Result;
+            Console.WriteLine(content);
+            if (content.Equals("{}"))
+                return new JArray();
+
             JArray json = JArray.Parse(content);
             return json;
         }
